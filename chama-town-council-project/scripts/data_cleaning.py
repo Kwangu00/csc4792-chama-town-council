@@ -26,16 +26,35 @@ def load_pipe_csv(filepath: Path) -> list[dict]:
         return list(reader)
 
 
+def clean_text_value(value: str) -> str:
+    """
+    Some cell values from the PDFs contain a literal line break where the
+    original text wrapped across two lines (e.g. "Mphalausen\nga" instead
+    of "Mphalausenga"). We replace embedded newlines with a single space
+    and collapse any resulting double spaces, so words don't stay broken
+    apart in the final dataset.
+    """
+    if not isinstance(value, str):
+        return value
+    cleaned = value.replace("\n", " ").replace("\r", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
 def save_pipe_csv(records: list[dict], filepath: Path):
     if not records:
         print(f"  [!] No records to save for {filepath.name}")
         return
     fieldnames = list(records[0].keys())
+    cleaned_records = [
+        {k: clean_text_value(v) for k, v in record.items()}
+        for record in records
+    ]
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="|")
         writer.writeheader()
-        writer.writerows(records)
-    print(f"  [+] Saved {len(records)} rows -> {filepath}")
+        writer.writerows(cleaned_records)
+    print(f"  [+] Saved {len(cleaned_records)} rows -> {filepath}")
 
 
 def clean_cdf_pages_community_projects():
