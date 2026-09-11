@@ -1,0 +1,23 @@
+file|column|description|data_type|example_value
+db-unza26-csc4792-cdf_community_projects.csv|source_url|URL of the Chama Town Council website page the project record was scraped from (either the CDF Tracker page or a Constituency page).|text (URL)|https://www.chamacouncil.gov.zm/?page_id=1127
+db-unza26-csc4792-cdf_community_projects.csv|year|The CDF funding year the project relates to, as stated on the source page.|integer (year)|2023
+db-unza26-csc4792-cdf_community_projects.csv|project_no|The project's listed number on the source page. Blank where the source page did not number that section of projects.|text|3
+db-unza26-csc4792-cdf_community_projects.csv|project_name_and_description|The project's name and description, combined into one field. The source text has no consistent separator between a project's name and its description, so these were kept together rather than split inaccurately.|text|CLASS ROOM BLOCK AT CHIKONTHA PRIMARY Construction of a 1x3 crb at Chikontha Primary School
+db-unza26-csc4792-cdf_community_projects.csv|sector|The project's sector classification as listed on the source page (e.g. EDUCATION, HEALTH, WATER AND SANITATION).|categorical text|EDUCATION
+db-unza26-csc4792-cdf_community_projects.csv|type|The type of activity carried out for the project (e.g. Construction, Procurement, Drilling, Renovation).|categorical text|Construction
+db-unza26-csc4792-cdf_community_projects.csv|ward_location_raw|The ward and/or site location of the project. Because the source page has no marker between one project's location and the next project's number/name, this field may also contain a fragment of the following project's leading text.|text|Chisunga Chikontha
+db-unza26-csc4792-chama_south_community_projects.csv|project_no|Project identifier as listed in the official Chama South Constituency Approved Community Projects PDF.|text|Project 4
+db-unza26-csc4792-chama_south_community_projects.csv|description|Full description of the approved CDF project.|text|AMBULANCE FOR HEALTH DEPARTMENT
+db-unza26-csc4792-chama_south_community_projects.csv|ward|Ward, or wards, the project serves. Some projects serve 'All Wards' rather than a single ward.|text|LUNZI
+db-unza26-csc4792-chama_south_community_projects.csv|amount_kwacha|Approved CDF funding amount for the project, in Zambian Kwacha (ZMW).|text (formatted number, comma thousands separator)|2,700,000.00
+db-unza26-csc4792-chama_south_community_projects.csv|sector|Sector classification for the project as listed in the source PDF (e.g. ROADS, HEALTH, EDUCATION, TRADITION).|categorical text|HEALTH
+db-unza26-csc4792-chama_south_community_projects.csv|year|The CDF funding year the project was approved under.|integer (year)|2024
+db-unza26-csc4792-chama_south_community_projects.csv|constituency|The constituency the project falls under.|categorical text|south
+db-unza26-csc4792-idp_ward_population.csv|area_name|Name of the district, constituency, or ward the row describes. District and constituency rows are subtotals; ward rows are the individual areas within them.|text|Kamphemba
+db-unza26-csc4792-idp_ward_population.csv|total_both_sexes / total_male / total_female|Total 2022 census population for the area, overall and split by sex.|text (formatted number, comma thousands separator)|17,392
+db-unza26-csc4792-idp_ward_population.csv|rural_both_sexes / rural_male / rural_female|2022 census population classified as rural for the area, overall and split by sex.|text (formatted number, comma thousands separator)|4,469
+db-unza26-csc4792-idp_ward_population.csv|urban_both_sexes / urban_male / urban_female|2022 census population classified as urban for the area, overall and split by sex. Shown as '-' where the area has no urban population recorded.|text (formatted number, comma thousands separator, or '-')|12,923
+db-unza26-csc4792-idp_ward_population.csv|area_km2|Land area of the district, constituency, or ward, in square kilometres.|text (formatted number)|72.1
+db-unza26-csc4792-idp_ward_population.csv|population_density|Population per square kilometre for the area.|decimal number|241.22
+db-unza26-csc4792-idp_revenue_forecast.csv|revenue_item|Name of the council revenue line item or category subtotal, from the IDP's five-year financial plan.|text|Market fees
+db-unza26-csc4792-idp_revenue_forecast.csv|year_2025 ... year_2030|Projected revenue for that line item in the given year, in Zambian Kwacha (ZMW).|decimal number|109500
