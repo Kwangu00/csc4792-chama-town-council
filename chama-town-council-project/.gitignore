@@ -1,0 +1,40 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Environment variables / secrets
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Data files (raw/processed data tracked via .gitkeep only, not committed by default)
+# Uncomment the following if you don't want to version large CSVs:
+# data/raw/*.csv
+# data/processed/*.csv
