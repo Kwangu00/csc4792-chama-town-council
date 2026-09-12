@@ -20,6 +20,10 @@ PROCESSED_DIR = Path("data/processed")
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Reads one of our raw pipe-delimited ("|") CSV files and gives back a
+# plain list of dictionaries, one dictionary per row. We use "|" instead
+# of the usual comma because a lot of the text we scraped already has
+# commas in it.
 def load_pipe_csv(filepath: Path) -> list[dict]:
     with open(filepath, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="|")
@@ -45,15 +49,24 @@ def clean_text_value(value: str) -> str:
     return cleaned.strip()
 
 
+# Saves a list of dictionaries to a pipe-delimited CSV file. Before
+# writing, every value in every row is passed through clean_text_value,
+# so we don't have to remember to clean text everywhere else in this
+# script - it just happens automatically whenever we save.
 def save_pipe_csv(records: list[dict], filepath: Path):
     if not records:
         print(f"  [!] No records to save for {filepath.name}")
         return
+
     fieldnames = list(records[0].keys())
-    cleaned_records = [
-        {k: clean_text_value(v) for k, v in record.items()}
-        for record in records
-    ]
+
+    cleaned_records = []
+    for record in records:
+        cleaned_record = {}
+        for key in record:
+            cleaned_record[key] = clean_text_value(record[key])
+        cleaned_records.append(cleaned_record)
+
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="|")
         writer.writeheader()
@@ -76,126 +89,263 @@ def clean_cdf_pages_community_projects():
     the text sitting between a "Community Projects" marker and whatever
     section comes next, and we skip past everything else untouched —
     regardless of which page it came from.
+
+    How we do this: we search the page text for a few different "marker"
+    phrases (a year, "Community Projects", or one of the sections we must
+    skip), remember where in the text each one was found, and then put
+    all of those markers back in the order they appear. Then we walk
+    through that ordered list once, from start to finish, deciding what
+    to do based on what kind of marker we're looking at.
     """
     print("Cleaning: CDF Tracker + Constituency pages, Community Projects only (privacy-safe)")
 
     pages = load_pipe_csv(RAW_DIR / "db-unza26-csc4792-raw_website_pages.csv")
-    target_pages = [
-        p for p in pages
-        if "page_id=1127" in p["url"] or "page_id=2507" in p["url"]
-        # TODO: add Chama North constituency page here once we have its URL
-    ]
 
-    marker_pattern = re.compile(
-        r"(?P<year>\b20\d{2}\b)"
-        r"|(?P<community>Community Projects)"
-        r"|(?P<empowerment_grants>Empowerment Grants)"
-        r"|(?P<empowerment_loans>Empowerment [Ll]oans)"
-        r"|(?P<bursaries>Secondary Boarding Bursaries|Skills Development Bursaries)"
-    )
+    target_pages = []
+    for page in pages:
+        if "page_id=1127" in page["url"] or "page_id=2507" in page["url"]:
+            target_pages.append(page)
+        # TODO: add Chama North constituency page here once we have its URL
+
+    # One simple regex pattern per kind of marker, instead of one big
+    # pattern that tries to match everything at once. This makes it
+    # obvious what each pattern is looking for.
+    year_pattern = re.compile(r"\b20\d{2}\b")
+    community_pattern = re.compile(r"Community Projects")
+    grants_pattern = re.compile(r"Empowerment Grants")
+    loans_pattern = re.compile(r"Empowerment Loans", re.IGNORECASE)
+    boarding_bursaries_pattern = re.compile(r"Secondary Boarding Bursaries")
+    skills_bursaries_pattern = re.compile(r"Skills Development Bursaries")
 
     all_rows = []
 
     for page in target_pages:
         text = page["body_text"]
-        matches = list(marker_pattern.finditer(text))
 
+        # Find every marker in this page's text and remember its
+        # position and what kind of marker it is. We do this one
+        # pattern at a time, so the list won't be in the right order
+        # yet - we fix that with a sort right after.
+        markers = []
+
+        for m in year_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "year", m.group()))
+
+        for m in community_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "community", m.group()))
+
+        for m in grants_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "skip", m.group()))
+
+        for m in loans_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "skip", m.group()))
+
+        for m in boarding_bursaries_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "skip", m.group()))
+
+        for m in skills_bursaries_pattern.finditer(text):
+            markers.append((m.start(), m.end(), "skip", m.group()))
+
+        # Put the markers back in the same order they appear in the
+        # actual text (they were found one pattern at a time above, so
+        # right now they are grouped by kind, not by position).
+        markers.sort(key=lambda marker: marker[0])
+
+        # Now walk through the markers once, in order, from the start
+        # of the text to the end.
         current_year = ""
-        for i, m in enumerate(matches):
-            kind = m.lastgroup
+        for i in range(len(markers)):
+            _marker_start, end, kind, matched_text = markers[i]
+
             if kind == "year":
-                current_year = m.group("year")
+                current_year = matched_text
                 continue
 
-            if kind == "community":
-                # Safe zone: everything from here to the next marker of ANY
-                # kind. We never look past that boundary — this is what
-                # keeps personal data out even when it sits right next to
-                # project data in the source text.
-                chunk_start = m.end()
-                chunk_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-                chunk = text[chunk_start:chunk_end].strip()
+            if kind == "skip":
+                # This is an Empowerment Grants/Loans or Bursaries
+                # marker. We deliberately do nothing here and never
+                # read the text that follows it, because those
+                # sections name real people (including school
+                # children), and we must not include that in the
+                # dataset.
+                continue
 
-                if not chunk:
-                    continue
+            # If we get here, kind must be "community".
+            # Safe zone: everything from the end of this marker up to
+            # the start of the NEXT marker of any kind. We never look
+            # past that boundary - this is what keeps personal data
+            # out even when it sits right next to project data in the
+            # source text.
+            chunk_start = end
+            if i + 1 < len(markers):
+                chunk_end = markers[i + 1][0]
+            else:
+                chunk_end = len(text)
+            chunk = text[chunk_start:chunk_end].strip()
 
-                project_rows = split_community_projects_chunk(
-                    chunk, year=current_year, source_url=page["url"]
-                )
-                all_rows.extend(project_rows)
+            if not chunk:
+                continue
 
-            # empowerment_grants / empowerment_loans / bursaries markers:
-            # deliberately do nothing. We never read the text after them
-            # here — the loop just moves on to the next marker.
+            project_rows = split_community_projects_chunk(chunk, current_year, page["url"])
+            all_rows.extend(project_rows)
 
     save_pipe_csv(all_rows, PROCESSED_DIR / "db-unza26-csc4792-cdf_community_projects.csv")
 
 
+# Looks through a chunk of text for the pattern "SECTOR word followed by
+# a TYPE word", e.g. "HEALTH Construction". This usually shows up right
+# after a project's own name and description, so it's a useful marker
+# for roughly where one project's text ends and the next one begins.
+#
+# Instead of writing one big regular expression with a long list of
+# sector names and type names all joined together with "|", we keep the
+# sector and type names as plain Python lists and check them one at a
+# time with simple, easy-to-read patterns.
+def find_sector_type_matches(chunk: str) -> list[tuple]:
+    sector_words = [
+        "EDUCATION", "HEALTH", "WATER AND SANITATION", "TRANSPORATION",
+        "TRANSPORT", "INFRASTRUCTURE", "DEFENCE", "ENERGY", "INFORMATION",
+        "COMMERCE", "TRADITIONAL/CULTURE", "TRADITIONAL", "SANITATION",
+        "WASTE MANAGEMENT",
+    ]
+    type_words = [
+        "Construction", "Procurement", "Renovation", "Drilling",
+        "Rehabilitation", "Completion",
+    ]
+
+    whitespace_pattern = re.compile(r"\s+")
+
+    matches = []
+
+    for sector_word in sector_words:
+        sector_pattern = re.compile(re.escape(sector_word), re.IGNORECASE)
+
+        for sector_match in sector_pattern.finditer(chunk):
+            # There must be at least one whitespace character right
+            # after the sector word, otherwise this isn't a real
+            # "SECTOR TYPE" pair.
+            gap_match = whitespace_pattern.match(chunk, sector_match.end())
+            if not gap_match:
+                continue
+
+            # See if one of our type words starts right after that
+            # whitespace.
+            matched_type_text = ""
+            match_end = 0
+            for type_word in type_words:
+                type_pattern = re.compile(re.escape(type_word), re.IGNORECASE)
+                type_match = type_pattern.match(chunk, gap_match.end())
+                if type_match:
+                    # Keep the actual text as it appears in the source
+                    # (e.g. "procurement" or "PROCUREMENT"), not just the
+                    # word from our list, so we don't lose the original
+                    # casing.
+                    matched_type_text = type_match.group()
+                    match_end = type_match.end()
+                    break
+
+            if matched_type_text == "":
+                continue
+
+            matches.append((sector_match.start(), match_end, sector_word.upper(), matched_type_text))
+
+    # Some sector words are contained inside another, longer sector word
+    # (e.g. "SANITATION" is contained inside "WATER AND SANITATION"). Since
+    # we checked each sector word separately above, a single real
+    # occurrence of "WATER AND SANITATION Drilling" would otherwise be
+    # counted twice: once for the full phrase, and once again for
+    # "SANITATION Drilling" hiding inside it. To fix this, we sort all the
+    # matches we found by position, and whenever a match starts inside a
+    # match we've already kept, we throw it away as a duplicate.
+    matches.sort(key=lambda item: (item[0], item[0] - item[1]))
+
+    deduplicated_matches = []
+    previous_match_end = -1
+    for match in matches:
+        match_start = match[0]
+        match_end = match[1]
+        if match_start < previous_match_end:
+            continue
+        deduplicated_matches.append(match)
+        previous_match_end = match_end
+
+    return deduplicated_matches
+
+
 def split_community_projects_chunk(chunk: str, year: str, source_url: str) -> list[dict]:
     """
-    Split one "Community Projects" chunk of text into individual project
-    rows.
+    Take one "Community Projects" chunk of text and split it into one
+    row per project.
 
-    Two anchors are used together:
+    The text we get here isn't already split into neat rows - it's all
+    one long string. To break it apart, we look for two kinds of clues:
 
-    1. SECTOR + TYPE pair (e.g. "HEALTH construction") marks the end of a
-       project's own name+description — matching the pair, not just the
-       bare sector word, avoids false hits inside project names like
-       "HEALTH POST IN MAIMBI" (see the SECTOR_TYPE_PATTERN docstring
-       below for why).
+    1. A SECTOR word followed by a TYPE word (e.g. "HEALTH Construction")
+       usually comes right after a project's own name/description, so it
+       marks roughly where one project's own text ends.
 
     2. A NUMBER immediately followed by an ALL-CAPS word (e.g. "3 CLASS
-       ROOM BLOCK") marks the START of the next project's own name. The
-       text between one project's SECTOR+TYPE and the next project's
-       number is a mix of the first project's ward/location and the
-       second project's leading number+name — this second anchor is what
-       lets us split that mixed text apart correctly, rather than leaving
-       the two projects' data tangled together in one field.
-    """
-    sector_words = r"(EDUCATION|HEALTH|WATER AND SANITATION|TRANSPORATION|TRANSPORT|INFRASTRUCTURE|DEFENCE|ENERGY|INFORMATION|COMMERCE|TRADITIONAL(?:/CULTURE)?|SANITATION|WASTE MANAGEMENT)"
-    type_words = r"(Construction|Procurement|Renovation|Drilling|Rehabilitation|Completion)"
-    sector_type_pattern = re.compile(sector_words + r"\s+" + type_words, re.IGNORECASE)
-    project_number_pattern = re.compile(r"\b(\d{1,3})\s+([A-Z][A-Z]+)")
+       ROOM BLOCK") usually marks the start of a project's own number
+       and name.
 
+    We walk through the chunk once, from start to end, one
+    SECTOR+TYPE match at a time, and build up one row per match. This is
+    real, messy PDF text, so this simple approach won't split every
+    project perfectly - some ward/location text can end up attached to
+    the wrong project. That's an acceptable trade-off for keeping the
+    code easy to follow.
+    """
+    # Remove the repeated table header text that sometimes appears in
+    # the middle of a chunk (e.g. "No. Project Name ... Project
+    # Site/Location") - it isn't real project data.
     chunk = re.sub(
         r"No\.\s*Project Name.*?Project Site/Location", "", chunk, flags=re.IGNORECASE
     )
 
-    matches = list(sector_type_pattern.finditer(chunk))
+    number_pattern = re.compile(r"(\d{1,3})\s+([A-Z][A-Z]+)")
+
+    sector_type_matches = find_sector_type_matches(chunk)
+
     rows = []
+    segment_start = 0
 
-    for i, sm in enumerate(matches):
-        # The raw text between the PREVIOUS sector+type match (or the very
-        # start of the chunk) and THIS sector+type match. This blob mixes
-        # the tail end of the previous project's ward/location with the
-        # lead-in (number + name + description) of the current project.
-        blob_start = matches[i - 1].end() if i > 0 else 0
-        blob = chunk[blob_start:sm.start()]
+    for i in range(len(sector_type_matches)):
+        match_start, match_end, sector, project_type = sector_type_matches[i]
 
-        # Find where THIS project's own number+name actually starts,
-        # using the LAST "number + CAPS word" match in the blob — the
-        # true project number is always the one closest to the sector,
-        # not any stray numbers earlier in the previous project's text.
-        number_matches = list(project_number_pattern.finditer(blob))
+        # The text between where the last project's SECTOR+TYPE match
+        # ended (or the start of the chunk, for the first project) and
+        # this SECTOR+TYPE match is roughly this project's own number
+        # and name/description.
+        segment_text = chunk[segment_start:match_start]
 
-        if number_matches:
-            split = number_matches[-1]
-            leftover_ward_location = blob[:split.start()].strip()
-            project_no = split.group(1)
-            name_and_description = blob[split.end() - len(split.group(2)):].strip()
+        number_matches_in_segment = list(number_pattern.finditer(segment_text))
+        if number_matches_in_segment:
+            # The real project number is the one closest to the sector
+            # word, i.e. the LAST number+CAPS match in this segment -
+            # any earlier ones are usually stray numbers left over from
+            # the previous project's ward/location text.
+            last_number_match = number_matches_in_segment[-1]
+            project_no = last_number_match.group(1)
+            name_and_description = segment_text[last_number_match.start(2):].strip()
         else:
-            leftover_ward_location = ""
             project_no = ""
-            name_and_description = blob.strip()
+            name_and_description = segment_text.strip()
 
-        # That leftover ward/location text actually belongs to the
-        # PREVIOUS row, not this one — go back and fill it in now that we
-        # know it.
-        if i > 0 and rows:
-            rows[-1]["ward_location_raw"] = leftover_ward_location
+        # The ward/location text for THIS project is whatever comes
+        # after this SECTOR+TYPE match, up until the next project's own
+        # number starts (or the end of the chunk, if this is the last
+        # project).
+        if i + 1 < len(sector_type_matches):
+            next_match_start = sector_type_matches[i + 1][0]
+        else:
+            next_match_start = len(chunk)
 
-        sector = sm.group(1).upper()
-        project_type = sm.group(2)
+        text_between_projects = chunk[match_end:next_match_start]
+        number_matches_between = list(number_pattern.finditer(text_between_projects))
+        if number_matches_between:
+            ward_location_raw = text_between_projects[:number_matches_between[-1].start()].strip()
+        else:
+            ward_location_raw = text_between_projects.strip()
 
         rows.append({
             "source_url": source_url,
@@ -204,14 +354,10 @@ def split_community_projects_chunk(chunk: str, year: str, source_url: str) -> li
             "project_name_and_description": name_and_description,
             "sector": sector,
             "type": project_type,
-            "ward_location_raw": "",  # filled in on the next iteration
+            "ward_location_raw": ward_location_raw,
         })
 
-    # The text after the FINAL sector+type match is the last project's
-    # ward/location — there's no further match to trigger filling it in,
-    # so we do it once, after the loop.
-    if matches and rows:
-        rows[-1]["ward_location_raw"] = chunk[matches[-1].end():].strip()
+        segment_start = match_end
 
     return rows
 
@@ -226,11 +372,11 @@ def clean_chama_south_community_projects():
     print("Cleaning: Chama South Community Projects (PDF)")
 
     rows = load_pipe_csv(RAW_DIR / "db-unza26-csc4792-raw_pdf_tables.csv")
-    target_rows = [
-        r for r in rows
-        if r["source_file"] == "Chama-South-Community-Projects.pdf"
-        and r["extraction_method"] == "table"
-    ]
+
+    target_rows = []
+    for row in rows:
+        if row["source_file"] == "Chama-South-Community-Projects.pdf" and row["extraction_method"] == "table":
+            target_rows.append(row)
 
     cleaned = []
     for r in target_rows:
@@ -271,11 +417,11 @@ def clean_idp_population_table():
     print("Cleaning: IDP population table")
 
     rows = load_pipe_csv(RAW_DIR / "db-unza26-csc4792-raw_pdf_tables.csv")
-    target_rows = [
-        r for r in rows
-        if r["category"] == "idp" and r["page"] in ("44", "45")
-        and r["extraction_method"] == "table"
-    ]
+
+    target_rows = []
+    for row in rows:
+        if row["category"] == "idp" and row["page"] in ("44", "45") and row["extraction_method"] == "table":
+            target_rows.append(row)
 
     column_names = [
         "area_name", "total_both_sexes", "total_male", "total_female",
@@ -304,6 +450,7 @@ def clean_idp_population_table():
 
     save_pipe_csv(cleaned, PROCESSED_DIR / "db-unza26-csc4792-idp_ward_population.csv")
 
+
 def clean_idp_revenue_forecast():
     """
     Extracts the five-year revenue forecast table from the IDP's Financial
@@ -319,12 +466,15 @@ def clean_idp_revenue_forecast():
     print("Cleaning: IDP revenue forecast table")
 
     rows = load_pipe_csv(RAW_DIR / "db-unza26-csc4792-raw_pdf_tables.csv")
-    target_pages = {str(p) for p in range(279, 283)}
-    target_rows = [
-        r for r in rows
-        if r["category"] == "idp" and r["page"] in target_pages
-        and r["extraction_method"] == "table"
-    ]
+
+    target_pages = set()
+    for page_number in range(279, 283):
+        target_pages.add(str(page_number))
+
+    target_rows = []
+    for row in rows:
+        if row["category"] == "idp" and row["page"] in target_pages and row["extraction_method"] == "table":
+            target_rows.append(row)
 
     # Rows belonging to the unrelated 2019-2024 historical table that
     # happens to sit on the same page — not part of the forecast.
@@ -370,6 +520,10 @@ def clean_idp_revenue_forecast():
     save_pipe_csv(cleaned, PROCESSED_DIR / "db-unza26-csc4792-idp_revenue_forecast.csv")
 
 
+# Runs all four cleaning steps, one after another, in the order the
+# output files depend on being produced. Each step reads its own raw
+# input file(s) and writes its own processed CSV file - they don't share
+# any data with each other.
 def main():
     clean_cdf_pages_community_projects()
     clean_chama_south_community_projects()
