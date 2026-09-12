@@ -74,8 +74,13 @@ python scripts/build_codebook.py
 **Note:** the council website's SSL certificate is broken on their end. Because of this, both `web_scraper.py` and `pdf_extractor.py` turn off certificate checking for this one specific site. This is explained in both scripts.
 
 ## Team Members
+Project Team #29
 
-- Kwangu Mulilo — Project Team #29
+- Kwangu Mulilo
+- Zita Mbambiko
+- Joshua Chota
+- Sarah Nuluyele
+- Izukanji Nachalwe
 
 ## Acknowledgements
 
