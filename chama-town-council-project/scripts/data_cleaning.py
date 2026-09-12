@@ -28,15 +28,19 @@ def load_pipe_csv(filepath: Path) -> list[dict]:
 
 def clean_text_value(value: str) -> str:
     """
-    Some cell values from the PDFs contain a literal line break where the
-    original text wrapped across two lines (e.g. "Mphalausen\nga" instead
-    of "Mphalausenga"). We replace embedded newlines with a single space
-    and collapse any resulting double spaces, so words don't stay broken
+    Some cell values contain a broken line-wrap from the original PDF —
+    either as a real newline character, or (as it turns out for this
+    data) as the literal two-character text "\\n" that ended up embedded
+    in the string itself. We replace both forms with a single space and
+    collapse any resulting double spaces, so words don't stay broken
     apart in the final dataset.
     """
     if not isinstance(value, str):
         return value
-    cleaned = value.replace("\n", " ").replace("\r", " ")
+    cleaned = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    # Also catch the literal two-character sequence backslash + n / r,
+    # in case it was stored as text rather than an actual newline.
+    cleaned = cleaned.replace("\\n", " ").replace("\\r", " ")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
