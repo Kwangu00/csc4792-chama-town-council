@@ -24,7 +24,6 @@ Run this with:
 
 import csv
 import time
-import re
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -90,52 +89,102 @@ def fetch_page(url: str) -> str | None:
         return None
 
 
+# Checks whether a URL looks like a WordPress "post" link, e.g.
+# "https://www.chamacouncil.gov.zm/?p=2438". WordPress post links always
+# have "?p=" followed by the post's ID number. We don't need a regular
+# expression for this - we can just look for the text "?p=" and then check
+# that what comes right after it is actually a number.
+def looks_like_post_url(url: str) -> bool:
+    if "?p=" not in url:
+        return False
+
+    text_after_p = url.split("?p=")[1]
+
+    # There could be more stuff in the URL after the number (like another
+    # "&something=" parameter), so we only look at the digits right at the
+    # start of text_after_p.
+    number_part = ""
+    for character in text_after_p:
+        if character.isdigit():
+            number_part += character
+        else:
+            break
+
+    return number_part != ""
+
+
+# Tries to find a WordPress sitemap to discover ALL news post URLs
+# automatically, instead of relying only on the handful of pages we found
+# manually. WordPress sites (with Yoast SEO or similar plugins) commonly
+# expose a sitemap.xml file that lists every page on the site.
 def discover_post_urls_from_sitemap() -> list[str]:
-    """
-    Try to find a WordPress sitemap to discover ALL news post URLs
-    automatically, instead of relying only on the handful we found manually.
-    WordPress (with Yoast SEO or similar) commonly exposes sitemap.xml.
-    """
     candidate_sitemaps = [
         f"{BASE_URL}/sitemap.xml",
         f"{BASE_URL}/sitemap_index.xml",
         f"{BASE_URL}/wp-sitemap.xml",
     ]
+
     post_urls = []
+
     for sitemap_url in candidate_sitemaps:
         html = fetch_page(sitemap_url)
-        if html and "<urlset" in html.lower() or (html and "<sitemapindex" in html.lower()):
-            soup = BeautifulSoup(html, "xml")
-            locs = [loc.text for loc in soup.find_all("loc")]
-            print(f"  [+] Found {len(locs)} URLs in {sitemap_url}")
-            post_urls.extend(locs)
+
+        if not html:
+            # This particular sitemap address doesn't exist on the site -
+            # just move on and try the next candidate.
+            continue
+
+        # A real sitemap file's XML will contain one of these two tags
+        # somewhere near the top. If neither is present, whatever we
+        # downloaded probably isn't a sitemap (e.g. a 404 error page).
+        lowercase_html = html.lower()
+        looks_like_a_sitemap = "<urlset" in lowercase_html or "<sitemapindex" in lowercase_html
+        if not looks_like_a_sitemap:
+            continue
+
+        soup = BeautifulSoup(html, "xml")
+        loc_tags = soup.find_all("loc")
+
+        urls_in_this_sitemap = []
+        for loc_tag in loc_tags:
+            urls_in_this_sitemap.append(loc_tag.text)
+
+        print(f"  [+] Found {len(urls_in_this_sitemap)} URLs in {sitemap_url}")
+        post_urls.extend(urls_in_this_sitemap)
+
     return post_urls
 
 
+# No sitemap exists on this site, so this function discovers news posts the
+# manual way: it visits the homepage, then each older page of posts
+# (WordPress typically paginates with ?paged=2, ?paged=3, ...), and collects
+# every link that looks like a post URL. It stops early if a page turns up
+# no new post links, or after max_pages as a safety limit so we never loop
+# forever.
 def discover_post_urls_from_pagination(max_pages: int = 25) -> list[str]:
-    """
-    No sitemap exists, so we discover news posts the manual way: visit the
-    homepage, then each older page of posts (WordPress typically paginates
-    with ?paged=2, ?paged=3, ...), and collect every link that matches the
-    site's post URL pattern (?p=NUMBER). We stop early if a page turns up
-    no new post links, or after max_pages as a safety limit so we never
-    loop forever.
-    """
-    post_url_pattern = re.compile(r"\?p=\d+")
     discovered = set()
 
     for page_num in range(1, max_pages + 1):
-        page_url = BASE_URL if page_num == 1 else f"{BASE_URL}/?paged={page_num}"
+        if page_num == 1:
+            page_url = BASE_URL
+        else:
+            page_url = f"{BASE_URL}/?paged={page_num}"
+
         html = fetch_page(page_url)
         if not html:
+            # Couldn't load this page at all - nothing more to discover,
+            # so stop paginating.
             break
 
         soup = BeautifulSoup(html, "html.parser")
+        all_links = soup.find_all("a", href=True)
+
         found_this_page = set()
-        for a in soup.find_all("a", href=True):
-            href = urljoin(BASE_URL, a["href"])
-            if post_url_pattern.search(href):
-                found_this_page.add(href.split("#")[0])  # strip any #fragment
+        for link in all_links:
+            href = urljoin(BASE_URL, link["href"])
+            if looks_like_post_url(href):
+                href_without_fragment = href.split("#")[0]  # strip any #fragment
+                found_this_page.add(href_without_fragment)
 
         new_urls = found_this_page - discovered
         print(f"  [+] Page {page_num}: {len(found_this_page)} post links found, {len(new_urls)} new")
@@ -149,42 +198,70 @@ def discover_post_urls_from_pagination(max_pages: int = 25) -> list[str]:
     return sorted(discovered)
 
 
+# Given a page's parsed HTML, tries to find the tag that holds the page's
+# "real" content — the article text, not the site's navbar/header/footer.
+# Different WordPress themes structure their pages differently, so we try
+# a few common possibilities in order, from most likely to least likely,
+# and use whichever one we find first.
+def find_content_container(soup: BeautifulSoup):
+    # <main> is the standard HTML5 landmark for "the actual page content" -
+    # most modern WordPress themes use it, so we check this first.
+    main_tag = soup.find("main")
+    if main_tag:
+        return main_tag
+
+    # Some themes instead use a <div> with one of these common id names.
+    for candidate_id in ("content", "primary", "main"):
+        div_tag = soup.find("div", id=candidate_id)
+        if div_tag:
+            return div_tag
+
+    # Some themes instead use a <div> with one of these common class names.
+    for div_tag in soup.find_all("div"):
+        classes = div_tag.get("class", [])
+        if "entry-content" in classes or "post-content" in classes:
+            return div_tag
+
+    article_tag = soup.find("article")
+    if article_tag:
+        return article_tag
+
+    # Last resort: just use the whole page body (this will include the
+    # nav menu and footer too, but it's better than returning nothing).
+    return soup.find("body")
+
+
+# Extracts the title, body text, and any linked PDF documents from a single
+# WordPress post or page. Returns None if we couldn't find anything worth
+# keeping, so the caller knows to skip this page.
 def parse_post(url: str, html: str) -> dict | None:
-    """
-    Extract title, date, and body text from a single WordPress post/page.
-    WordPress themes vary, so this uses a few fallback strategies, ordered
-    from most-specific (likely to be just the article) to least-specific
-    (the whole page, nav menu included — last resort only).
-    """
     soup = BeautifulSoup(html, "html.parser")
 
     # Title: usually in <h1> or <title>
     title_tag = soup.find("h1") or soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else ""
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+    else:
+        title = ""
 
-    # Body text: try content containers from most to least specific.
-    # <main> is the standard HTML5 landmark for "the actual page content,
-    # not the nav/header/footer" — most modern WordPress themes use it,
-    # which is why it goes first, ahead of our earlier class-name guesses.
-    content_tag = (
-        soup.find("main")
-        or soup.find("div", id=re.compile(r"^(content|primary|main)$"))
-        or soup.find("div", class_=re.compile(r"entry-content|post-content"))
-        or soup.find("article")
-        or soup.find("body")
-    )
-    body_text = content_tag.get_text(separator=" ", strip=True) if content_tag else ""
-
-    # Collect every link on the page too — this is how we'll find the CDF
-    # PDF documents (Approved Community Projects.pdf, etc.) linked from
-    # pages like the Constituency pages. We keep link text + URL together.
-    links = []
+    content_tag = find_content_container(soup)
     if content_tag:
-        for a in content_tag.find_all("a", href=True):
-            href = urljoin(url, a["href"])
-            link_text = a.get_text(strip=True)
+        body_text = content_tag.get_text(separator=" ", strip=True)
+    else:
+        body_text = ""
+
+    # Collect every PDF link inside the content area too - this is how
+    # we'll find the CDF PDF documents (Approved Community Projects.pdf,
+    # etc.) linked from pages like the Constituency pages. We keep the
+    # link text together with its URL.
+    pdf_links = []
+    if content_tag:
+        links_in_content = content_tag.find_all("a", href=True)
+        for link in links_in_content:
+            href = urljoin(url, link["href"])
             if href.lower().endswith(".pdf"):
-                links.append(f"{link_text} -> {href}")
+                link_text = link.get_text(strip=True)
+                pdf_links.append(f"{link_text} -> {href}")
 
     if not title and not body_text:
         return None
@@ -193,7 +270,7 @@ def parse_post(url: str, html: str) -> dict | None:
         "url": url,
         "title": title,
         "body_text": body_text,
-        "pdf_links": " | ".join(links),
+        "pdf_links": " | ".join(pdf_links),
     }
 
 
