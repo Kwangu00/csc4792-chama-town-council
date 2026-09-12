@@ -108,14 +108,12 @@ RAW_DIR = Path("data/raw")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Downloads one PDF and saves it under data/raw/pdfs/, so we only ever have
+# to download each file once. If the file is already there from a previous
+# run, we just reuse it instead of downloading it again. The council's
+# server can be a bit unreliable, so if a download fails we wait a few
+# seconds and try again, up to `retries` extra times, before giving up.
 def download_pdf(url: str, retries: int = 2) -> Path | None:
-    """
-    Download a PDF to data/raw/pdfs/ if not already there. Returns local path.
-    The council server is slow/unreliable for larger files, so we:
-      - stream the download in chunks instead of waiting for it all at once
-      - use a generous timeout
-      - retry a couple of times before giving up
-    """
     filename = url.split("/")[-1]
     local_path = PDF_DIR / filename
 
@@ -125,48 +123,76 @@ def download_pdf(url: str, retries: int = 2) -> Path | None:
 
     for attempt in range(1, retries + 2):
         try:
-            with requests.get(
-                url, headers=HEADERS, timeout=120, verify=VERIFY_SSL, stream=True
-            ) as response:
-                response.raise_for_status()
-                total_bytes = 0
-                with open(local_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        total_bytes += len(chunk)
-            time.sleep(REQUEST_DELAY)
-            print(f"  [+] Downloaded: {filename} ({total_bytes // 1024} KB)")
-            return local_path
+            response = requests.get(url, headers=HEADERS, timeout=120, verify=VERIFY_SSL)
+            response.raise_for_status()
         except requests.RequestException as e:
             print(f"  [!] Attempt {attempt} failed for {filename}: {e}")
-            if local_path.exists():
-                local_path.unlink()  # remove partial/corrupt download
-            if attempt <= retries:
-                time.sleep(5)
+            time.sleep(5)
+            continue
+
+        with open(local_path, "wb") as f:
+            f.write(response.content)
+
+        time.sleep(REQUEST_DELAY)
+        print(f"  [+] Downloaded: {filename} ({len(response.content) // 1024} KB)")
+        return local_path
+
     print(f"  [x] Giving up on {filename} after {retries + 1} attempts")
     return None
 
 
+# Goes through a PDF page by page and pulls out its data. For each page we
+# first try pdfplumber's table detection, since these documents are
+# genuinely tabular (project name, sector, ward, amount, etc. in columns)
+# and that preserves the column structure far better than plain text would.
+# Some government PDFs are scanned or don't use real table gridlines though,
+# so if no table is found on a page, we fall back to grabbing its plain
+# text instead, one output row per line. Every row we produce is tagged
+# with the source's metadata (category, year, constituency) so nothing
+# loses that context once all the files are combined later.
 def extract_tables(pdf_path: Path, source_meta: dict) -> list[dict]:
-    """
-    Extract data from every page of a PDF, preferring detected tables but
-    falling back to plain text when no table structure is found (common
-    with government PDFs that are scanned or use plain positioned text
-    instead of real table gridlines). Every row/line is tagged with source
-    metadata so nothing loses context once files are combined later.
-    """
     rows_out = []
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
+
+            # Step 1: go through every page in the PDF, one at a time.
             for page_num, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables()
+
+                tables_on_this_page = page.extract_tables()
                 page_had_table_rows = False
 
-                for table in tables:
+                # Step 2: go through every table pdfplumber found on this
+                # page (there can be more than one table per page).
+                for table in tables_on_this_page:
+
+                    # Step 3: go through every row in this table.
                     for row in table:
-                        if not row or all(cell is None or str(cell).strip() == "" for cell in row):
+                        if not row:
                             continue
+
+                        # A row where every cell is blank isn't real data
+                        # (usually just pdfplumber picking up an empty
+                        # gridline), so we check each cell one at a time
+                        # and skip the row if none of them have any text.
+                        row_is_empty = True
+                        for cell in row:
+                            if cell is not None and str(cell).strip() != "":
+                                row_is_empty = False
+                                break
+
+                        if row_is_empty:
+                            continue
+
                         page_had_table_rows = True
+
+                        cell_texts = []
+                        for cell in row:
+                            if cell is None:
+                                cell_texts.append("")
+                            else:
+                                cell_texts.append(str(cell).strip())
+
                         rows_out.append({
                             "source_file": pdf_path.name,
                             "category": source_meta["category"],
@@ -174,16 +200,15 @@ def extract_tables(pdf_path: Path, source_meta: dict) -> list[dict]:
                             "constituency": source_meta["constituency"],
                             "page": page_num,
                             "extraction_method": "table",
-                            "row_data": " | ".join(
-                                (str(c).strip() if c is not None else "") for c in row
-                            ),
+                            "row_data": " | ".join(cell_texts),
                         })
 
                 # Fallback: no table detected on this page — grab plain text
                 # instead so we still capture the content, one line per row.
                 if not page_had_table_rows:
                     text = page.extract_text() or ""
-                    for line in text.split("\n"):
+                    lines = text.split("\n")
+                    for line in lines:
                         line = line.strip()
                         if not line:
                             continue
@@ -198,9 +223,14 @@ def extract_tables(pdf_path: Path, source_meta: dict) -> list[dict]:
                         })
     except Exception as e:
         print(f"  [!] Failed to extract from {pdf_path.name}: {e}")
+
     return rows_out
 
 
+# Writes all the extracted rows out to one pipe-delimited CSV file, so
+# every PDF's data ends up combined together in a single place. We use "|"
+# instead of a comma because some of the extracted text already contains
+# commas.
 def save_raw_csv(records: list[dict], filename: str):
     if not records:
         print(f"  [!] No records to save for {filename}")
@@ -214,6 +244,9 @@ def save_raw_csv(records: list[dict], filename: str):
     print(f"  [+] Saved {len(records)} rows -> {filepath}")
 
 
+# Runs the whole pipeline in order: download every PDF we know about,
+# extract its data, then save everything to one combined CSV file at the
+# end.
 def main():
     print(f"Step 1: Downloading {len(PDF_SOURCES)} PDFs...")
     downloaded = []
